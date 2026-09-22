@@ -1,3 +1,4 @@
+import type { OtpCodeRetrieverOptions } from "israeli-bank-scrapers";
 import { Context, Telegraf, TelegramError } from "telegraf";
 import { message } from "telegraf/filters";
 import { config } from "../config.js";
@@ -169,7 +170,8 @@ export function sendError(message: unknown, caller: string = "") {
  */
 export async function requestOtpCode(
   companyId: string,
-  phoneNumber: string,
+  phoneNumber?: string,
+  options?: OtpCodeRetrieverOptions,
 ): Promise<string> {
   if (!bot || !telegramConfig?.chatId || !telegramConfig.enableOtp) {
     throw new Error("Telegram OTP is not enabled or configured");
@@ -178,7 +180,8 @@ export async function requestOtpCode(
   const requestMessage = await send(
     `🔐 2FA Authentication Required\n\n` +
       `Account: ${companyId}\n` +
-      `Please enter the OTP code sent to ${phoneNumber}:\n\n` +
+      `${otpRequestContext(options)}` +
+      `Please enter the OTP code sent to ${phoneNumber ?? "your phone"}:\n\n` +
       `Reply to this message with the code.`,
   );
 
@@ -239,4 +242,17 @@ export async function requestOtpCode(
   } finally {
     bot.stop();
   }
+}
+
+function otpRequestContext(options?: OtpCodeRetrieverOptions): string {
+  if (options?.resendFailed) {
+    return `⚠️ Could not ask the bank for a new code — use the one you already have.\n`;
+  }
+  if (options?.resent) {
+    return `📨 A new code was requested, wait for the SMS.\n`;
+  }
+  if (options && options.attempt > 1) {
+    return `❌ The previous code was rejected (attempt ${options.attempt}).\n`;
+  }
+  return "";
 }
