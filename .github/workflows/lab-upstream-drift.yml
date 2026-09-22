@@ -1,0 +1,94 @@
+# Tells us when this fork has fallen behind, and when it can be retired.
+#
+# The lab/hapoalim branch un-gates moneyman's Telegram OTP relay for Hapoalim and
+# adds a persistent browser profile. Two things are worth knowing without watching
+# upstream by hand: that it cut a release we are not rebased onto, and that its
+# own OTP code started handling hapoalim — at which point our OTP commits should
+# be dropped rather than rebased again.
+#
+# It reports by FAILING, not by opening an issue: a fork's GITHUB_TOKEN is refused
+# createIssue even with `issues: write` and issues enabled, and GitHub emails the
+# repo owner when a scheduled workflow fails. No PAT, no de-duplication logic.
+name: Upstream drift
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Report drift even when there is none (tests the failure path)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM: daniel-hauser/moneyman
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compare this branch's base tag with the latest upstream release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch --quiet --tags upstream
+
+          # Our own -lab.<n> tags sit on this branch too; the base is upstream's.
+          base=$(git describe --tags --abbrev=0 --exclude '*-lab.*' HEAD)
+          latest=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          upstream_otp=$(gh api "repos/${UPSTREAM}/contents/src/scraper/otp.ts" --jq .content | base64 -d)
+          if [[ "$upstream_otp" == *hapoalim* ]]; then
+            otp_upstream=yes
+          else
+            otp_upstream=no
+          fi
+
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| this branch is based on | \`${base}\` |"
+            echo "| latest upstream release | \`${latest}\` |"
+            echo "| upstream OTP relay handles hapoalim | ${otp_upstream} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$base" = "$latest" ] && [ "$otp_upstream" = "no" ] && [ "${FORCE}" != "true" ]; then
+            echo "Up to date with ${latest}; upstream still gates OTP. Nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo
+            if [ "$otp_upstream" = "yes" ]; then
+              echo "### Upstream's OTP relay now mentions hapoalim"
+              echo
+              echo "Check whether it covers resend and a persistent profile. Drop whichever of"
+              echo "our commits it makes redundant instead of rebasing them."
+            else
+              echo "### Rebase needed"
+            fi
+            echo
+            echo "See LAB.md for the whole ritual:"
+            echo
+            echo '```'
+            echo "git fetch upstream --tags"
+            echo "git rebase -X ignore-space-change --onto ${latest} ${base} lab/hapoalim"
+            echo "npm ci && npm test"
+            echo "git push --force-with-lease"
+            echo "git tag ${latest}-lab.1 && git push origin ${latest}-lab.1"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error::lab/hapoalim is based on ${base}; upstream is at ${latest}; upstream OTP handles hapoalim: ${otp_upstream}"
+          exit 1
