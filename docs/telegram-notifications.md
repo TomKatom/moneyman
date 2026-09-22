@@ -76,3 +76,18 @@ If you have OneZero accounts that require 2FA authentication, you can enable OTP
    - Send a message asking for the OTP code
    - Wait for you to reply with the code (4-8 digits)
    - Continue the scraping process automatically
+
+## Using OTP 2FA with Bank Hapoalim
+
+Hapoalim sends an SMS code when it does not recognise the browser. With
+`enableOtp: true`, a `hapoalim` account needs no extra configuration — the bank
+texts the number it has on file.
+
+Bank codes expire within minutes, often before you see the prompt. Reply
+`resend` (or `r`, or `שלח שוב`) and the scraper asks the bank for a new code
+without using up one of the three login attempts. The next prompt says whether
+the new code was requested, or whether no send-again control was found and you
+should use the code you already have.
+
+Any other reply gets a short usage hint and the bot keeps waiting. Halfway
+through `otpTimeoutSeconds` the bot sends a reminder.
