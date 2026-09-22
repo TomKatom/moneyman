@@ -1,10 +1,12 @@
-import type { OtpCodeRetrieverOptions } from "israeli-bank-scrapers";
+import {
+  OTP_RESEND,
+  type OtpCodeRetrieverOptions,
+} from "israeli-bank-scrapers";
 import { Context, Telegraf, TelegramError } from "telegraf";
 import { message } from "telegraf/filters";
 import { config } from "../config.js";
 import type { ImageWithCaption } from "../types.js";
 import { createLogger, logToPublicLog } from "../utils/logger.js";
-import { waitForAbortSignal } from "../utils/promises.js";
 import { formatUnknownError } from "../utils/utils.js";
 import { assignDeprecationHandler } from "./deprecationManager.js";
 
@@ -12,6 +14,11 @@ const logger = createLogger("notifier");
 
 const telegramConfig = config.options.notifications?.telegram;
 const bot = telegramConfig ? new Telegraf(telegramConfig.apiKey) : null;
+
+type TextContext = Context & { message: { text: string; date: number } };
+
+// Only one OTP prompt is answerable at a time.
+let pendingOtpReply: ((ctx: TextContext) => void) | undefined;
 
 logToPublicLog(
   bot
@@ -23,6 +30,16 @@ logToPublicLog(
 logger(`Telegram bot initialized: ${Boolean(bot)}`);
 if (bot && telegramConfig) {
   logger(`Telegram chat ID: ${telegramConfig.chatId}`);
+
+  if (telegramConfig.enableOtp) {
+    // Registered once: a Telegraf handler cannot be removed, and a stale one
+    // left by an earlier prompt would swallow every reply to the next.
+    bot.on(message("text"), (ctx) => {
+      if (ctx.chat.id.toString() === telegramConfig.chatId) {
+        pendingOtpReply?.(ctx);
+      }
+    });
+  }
 
   assignDeprecationHandler((messageId, message) => {
     if (!config.options.scraping.hiddenDeprecations?.includes(messageId)) {
@@ -165,8 +182,27 @@ export function sendError(message: unknown, caller: string = "") {
   );
 }
 
+const OTP_CODE_REPLY = /^\d{4,8}$/;
+const OTP_RESEND_REPLY = /^(resend|r|שלח שוב)$/i;
+
 /**
- * Request an OTP code from the user via Telegram and wait for their response
+ * Maps a reply to the OTP prompt to a code, the resend sentinel, or undefined
+ * when it is neither.
+ */
+export function parseOtpReply(text: string): string | undefined {
+  const reply = text.trim();
+  if (OTP_CODE_REPLY.test(reply)) {
+    return reply;
+  }
+  if (OTP_RESEND_REPLY.test(reply)) {
+    return OTP_RESEND;
+  }
+  return undefined;
+}
+
+/**
+ * Request an OTP code from the user via Telegram and wait for their response.
+ * Resolves with the code, or with OTP_RESEND when the user asks for a new one.
  */
 export async function requestOtpCode(
   companyId: string,
@@ -182,7 +218,7 @@ export async function requestOtpCode(
       `Account: ${companyId}\n` +
       `${otpRequestContext(options)}` +
       `Please enter the OTP code sent to ${phoneNumber ?? "your phone"}:\n\n` +
-      `Reply to this message with the code.`,
+      `Reply with the digits, or "resend" for a fresh code.`,
   );
 
   if (!requestMessage) {
@@ -192,36 +228,51 @@ export async function requestOtpCode(
   logger("Waiting for OTP code from user...");
 
   const timeoutSeconds = telegramConfig.otpTimeoutSeconds;
-  const timeoutPromise = waitForAbortSignal(
-    AbortSignal.timeout(timeoutSeconds * 1000),
-  ).catch(() => {
-    throw new Error(
-      `OTP timeout: No response received within ${timeoutSeconds} seconds`,
-    );
-  });
+  let nudgeTimer: NodeJS.Timeout | undefined;
+  let timeoutTimer: NodeJS.Timeout | undefined;
 
   const responsePromise = new Promise<string>((resolve, reject) => {
-    const handler = (ctx: Context) => {
-      if (ctx.chat?.id?.toString() !== telegramConfig.chatId) {
+    timeoutTimer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `OTP timeout: No response received within ${timeoutSeconds} seconds`,
+          ),
+        ),
+      timeoutSeconds * 1000,
+    );
+    nudgeTimer = setTimeout(() => {
+      send(
+        `⏳ Still waiting for the ${companyId} OTP — ` +
+          `${Math.ceil(timeoutSeconds / 120)} minutes left. ` +
+          `Reply with the digits, or "resend" for a fresh code.`,
+      ).catch((e) => logger("Failed to send OTP nudge", e));
+    }, timeoutSeconds * 500);
+
+    pendingOtpReply = (ctx) => {
+      // Polling restarts for every prompt, and Telegram redelivers updates the
+      // last poll did not confirm — including the "resend" behind this prompt.
+      if (ctx.message.date < requestMessage.date) {
         return;
       }
 
-      if (!ctx.message || !("text" in ctx.message)) {
+      const reply = parseOtpReply(ctx.message.text);
+      if (reply === undefined) {
+        void ctx.reply(
+          `Reply with the ${companyId} OTP digits, or "resend" for a fresh code.`,
+        );
         return;
       }
 
-      const text = ctx.message.text?.trim();
-      if (!text) {
-        return;
+      if (reply === OTP_RESEND) {
+        logger("User asked for a new OTP code");
+        void ctx.reply("📨 Asking the bank for a new code...");
+      } else {
+        logger("Received OTP code");
+        void ctx.reply("✅ OTP code received. Continuing authentication...");
       }
-
-      logger(`Received OTP code: ${text}`);
-      void ctx.reply("✅ OTP code received. Continuing authentication...");
-
-      resolve(text);
+      resolve(reply);
     };
-
-    bot.on(message("text"), handler);
 
     bot
       .launch(() => {
@@ -238,9 +289,16 @@ export async function requestOtpCode(
   });
 
   try {
-    return await Promise.race([responsePromise, timeoutPromise]);
+    return await responsePromise;
   } finally {
-    bot.stop();
+    clearTimeout(nudgeTimer);
+    clearTimeout(timeoutTimer);
+    pendingOtpReply = undefined;
+    try {
+      bot.stop();
+    } catch (e) {
+      logger("Failed to stop the Telegram bot", e);
+    }
   }
 }
 
