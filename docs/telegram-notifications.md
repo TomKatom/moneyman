@@ -91,3 +91,9 @@ should use the code you already have.
 
 Any other reply gets a short usage hint and the bot keeps waiting. Halfway
 through `otpTimeoutSeconds` the bot sends a reminder.
+
+To make the challenge rare rather than nightly, set
+`MONEYMAN_BROWSER_PROFILE_PATH` to a persistent directory: the browser profile —
+and with it the bank's device trust — then survives between runs. The profile
+holds live bank session cookies, so keep it out of backups, and scrape one
+account per run when using it: all accounts in a run share the profile.

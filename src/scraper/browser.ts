@@ -1,3 +1,5 @@
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { CompanyTypes } from "israeli-bank-scrapers";
 import puppeteer, {
   TargetType,
@@ -23,25 +25,57 @@ export const browserArgs = [
 export const browserExecutablePath =
   config.options.scraping.puppeteerExecutablePath || undefined;
 
+/**
+ * A persistent Chromium profile keeps cookies, localStorage and IndexedDB between
+ * runs, which is where banks keep device trust. Without it every run is a new
+ * device, and banks that challenge new devices (Hapoalim) ask for an OTP nightly.
+ */
+export const browserProfilePath =
+  process.env.MONEYMAN_BROWSER_PROFILE_PATH || undefined;
+
 const logger = createLogger("browser");
 
 export async function createBrowser(): Promise<Browser> {
+  if (browserProfilePath) {
+    await clearStaleProfileLock(browserProfilePath);
+  }
+
   const options = {
     args: browserArgs,
     executablePath: browserExecutablePath,
     // Hide the "Chrome is being controlled by automated software" marker.
     ignoreDefaultArgs: ["--enable-automation"],
+    userDataDir: browserProfilePath,
   } satisfies LaunchOptions;
 
   logger("Creating browser", options);
   return puppeteer.launch(options);
 }
 
+/**
+ * Chromium refuses a profile whose Singleton* files point at another process.
+ * A run killed mid-scrape leaves them behind, and in a container the hostname
+ * and PID they record never match again. Only one run may use a profile at a
+ * time, so any lock found at start-up is stale.
+ */
+async function clearStaleProfileLock(profilePath: string) {
+  await Promise.all(
+    ["SingletonLock", "SingletonSocket", "SingletonCookie"].map((name) =>
+      rm(join(profilePath, name), { force: true }),
+    ),
+  );
+}
+
 export async function createSecureBrowserContext(
   browser: Browser,
   companyId: CompanyTypes,
 ): Promise<BrowserContext> {
-  const context = await browser.createBrowserContext();
+  // Only the default context is backed by the profile on disk; any context
+  // created on top of it is incognito and forgotten on close. Accounts scraped
+  // in the same run therefore share it.
+  const context = browserProfilePath
+    ? browser.defaultBrowserContext()
+    : await browser.createBrowserContext();
   await initDomainTracking(context, companyId);
   await initCloudflareSkipping(context);
   return context;
