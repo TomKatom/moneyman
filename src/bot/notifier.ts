@@ -17,6 +17,12 @@ const bot = telegramConfig ? new Telegraf(telegramConfig.apiKey) : null;
 
 type TextContext = Context & { message: { text: string; date: number } };
 
+/**
+ * telegraf gives a request 500 seconds. A stalled one held the 2026-11-12
+ * Hapoalim run for two minutes, so the run path gets a much shorter leash.
+ */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
 // Only one OTP prompt is answerable at a time.
 let pendingOtpReply: ((ctx: TextContext) => void) | undefined;
 
@@ -75,9 +81,11 @@ export async function send(message: string, parseMode?: "HTML") {
   if (!bot || !telegramConfig?.chatId) {
     return;
   }
-  return await bot.telegram.sendMessage(telegramConfig.chatId, message, {
-    parse_mode: parseMode,
-  });
+  return await withTimeout(
+    bot.telegram.sendMessage(telegramConfig.chatId, message, {
+      parse_mode: parseMode,
+    }),
+  );
 }
 
 export async function sendPhoto(photoPath: string, caption: string) {
@@ -147,14 +155,16 @@ export async function editMessage(
      * According to the docs, the limit is 30 messages per second so we should be safe with 250ms.
      */
     await new Promise((resolve) => setTimeout(resolve, 250));
-    await bot.telegram.editMessageText(
-      telegramConfig.chatId,
-      message,
-      undefined,
-      newText,
-      {
-        parse_mode: parseMode,
-      },
+    await withTimeout(
+      bot.telegram.editMessageText(
+        telegramConfig.chatId,
+        message,
+        undefined,
+        newText,
+        {
+          parse_mode: parseMode,
+        },
+      ),
     );
   } catch (e) {
     if (canIgnoreTelegramError(e)) {
@@ -163,6 +173,55 @@ export async function editMessage(
       throw e;
     }
   }
+}
+
+class TelegramTimeoutError extends Error {
+  code = "TIMEOUT";
+  constructor() {
+    super(`Telegram did not answer within ${REQUEST_TIMEOUT_MS / 1000}s`);
+  }
+}
+
+async function withTimeout<T>(request: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new TelegramTimeoutError()),
+      REQUEST_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Sends a run notification without letting it fail the run. The chat is the
+ * operator's view of a run, not part of it, so the scrape and the import into
+ * storage go ahead when Telegram is down or slow. On 2026-11-12 a rejected
+ * "Starting..." ended a Hapoalim run before the browser opened, with exit 0.
+ *
+ * The public log gets the error code and never the message, because node-fetch
+ * puts the request URL into its messages and that URL carries the bot token.
+ */
+export async function bestEffort<T>(
+  what: string,
+  request: () => Promise<T>,
+): Promise<T | undefined> {
+  try {
+    return await request();
+  } catch (e) {
+    logger(`Failed to send ${what}`, e);
+    logToPublicLog(`Telegram failed, ${what} not sent (${errorCode(e)})`);
+    return undefined;
+  }
+}
+
+function errorCode(e: unknown) {
+  const { code, name } = (e ?? {}) as { code?: unknown; name?: unknown };
+  return String(code ?? name ?? "unknown");
 }
 
 function canIgnoreTelegramError(e: unknown) {

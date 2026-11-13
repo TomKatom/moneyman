@@ -9,7 +9,7 @@ import { createLogger } from "../../utils/logger.js";
 import { loggerContextStore } from "../../utils/asyncContext.js";
 import { Timer } from "../../utils/Timer.js";
 import { saving } from "../messages.js";
-import { editMessage, send, sendError } from "../notifier.js";
+import { bestEffort, editMessage, send, sendError } from "../notifier.js";
 import { statsString } from "../saveStats.js";
 import { ActualBudgetStorage } from "./actual.js";
 import { AzureDataExplorerStorage } from "./azure-data-explorer.js";
@@ -41,13 +41,17 @@ export const storages = [
 
 export async function saveResults(results: Array<AccountScrapeResult>) {
   if (storages.length === 0) {
-    await send("No storages found, skipping save");
+    await bestEffort("save notice", () =>
+      send("No storages found, skipping save"),
+    );
     return;
   }
 
   const txns = resultsToTransactions(results);
   if (txns.length === 0) {
-    await send("No transactions found, skipping save");
+    await bestEffort("save notice", () =>
+      send("No transactions found, skipping save"),
+    );
     return;
   }
 
@@ -73,27 +77,35 @@ export async function saveResults(results: Array<AccountScrapeResult>) {
       return loggerContextStore.run({ prefix: `[${name}]` }, async () => {
         try {
           logger(`saving ${txns.length} transactions`);
-          const message = await send(saving(name));
+          const message = await bestEffort("save status", () =>
+            send(saving(name)),
+          );
           const start = performance.now();
           const stats = await storage.saveTransactions(
             txns,
             async (step) => {
               steps.at(-1)?.end();
               steps.push(new Timer(step));
-              await editMessage(message?.message_id, saving(name, steps));
+              await bestEffort("save status", () =>
+                editMessage(message?.message_id, saving(name, steps)),
+              );
             },
             context,
           );
           const duration = performance.now() - start;
           steps.at(-1)?.end();
           logger(`saved`);
-          await editMessage(
-            message?.message_id,
-            statsString(stats, duration, steps),
+          await bestEffort("save summary", () =>
+            editMessage(
+              message?.message_id,
+              statsString(stats, duration, steps),
+            ),
           );
         } catch (e) {
           logger(`error saving transactions`, e);
-          sendError(e, `saveTransactions::${name}`);
+          void bestEffort("save error", () =>
+            sendError(e, `saveTransactions::${name}`),
+          );
         }
       });
     }),
