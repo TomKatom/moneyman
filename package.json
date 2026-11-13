@@ -53,7 +53,7 @@
     "glob": "^14.0.4",
     "google-auth-library": "^11.3.3",
     "google-spreadsheet": "^5.3.0",
-    "israeli-bank-scrapers": "^6.13.0",
+    "israeli-bank-scrapers": "github:TomKatom/israeli-bank-scrapers#2367bf94ac82a8dccc202c92e02c6affa3aaf721",
     "jsonc-parser": "^3.3.1",
     "lit": "^3.3.3",
     "node-cron": "^4.6.0",
