@@ -23,6 +23,7 @@ const runtimeVariables = new Set([
   "TZ",
   "PUPPETEER_EXECUTABLE_PATH",
   "PUPPETEER_CACHE_DIR",
+  "MONEYMAN_BROWSER_PROFILE_PATH",
 ]);
 
 export function workerEnvironment(
