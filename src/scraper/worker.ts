@@ -12,6 +12,7 @@ import { aborted } from "node:util";
 import { createDomainTracker } from "../security/domains.js";
 import { formatUnknownError } from "../utils/utils.js";
 import { WorkerConfigSchema, type ScraperWorkerApi } from "./protocol.js";
+import { findOtpAccountIndex } from "./otp.js";
 
 function createScraperSession(): ScraperWorkerApi {
   const abort = new AbortController();
@@ -73,7 +74,7 @@ function createScraperSession(): ScraperWorkerApi {
                     abort.abort(error);
                   }),
               requestOtpCode: scraping.enableOtp
-                ? async (companyId, phoneNumber) => {
+                ? async (companyId, phoneNumber, _signal, options) => {
                     abort.signal.throwIfAborted();
                     const completed = new AbortController();
                     const signal = AbortSignal.any([
@@ -83,13 +84,12 @@ function createScraperSession(): ScraperWorkerApi {
                     try {
                       const response = await Promise.race([
                         callbacks.otp(
-                          scraping.accounts.findIndex(
-                            (account) =>
-                              account.companyId === companyId &&
-                              !("otpLongTermToken" in account) &&
-                              "phoneNumber" in account &&
-                              account.phoneNumber === phoneNumber,
+                          findOtpAccountIndex(
+                            scraping.accounts,
+                            companyId,
+                            phoneNumber,
                           ),
+                          ...(options ? [options] : []),
                         ),
                         aborted(signal, callbacks),
                       ]);

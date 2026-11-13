@@ -1,5 +1,6 @@
 import z from "zod/v4";
 import type { ProxyMarked, Remote } from "comlink";
+import type { OtpCodeRetrieverOptions } from "israeli-bank-scrapers";
 import type {
   AccountConfig,
   AccountScrapeResult,
@@ -40,7 +41,7 @@ export interface WorkerCallbacks {
   timing(timing: RunTiming): Promise<void>;
   status(status: string[], totalTime?: number): Promise<void>;
   warning(error: unknown, caller: string): Promise<void>;
-  otp(accountIndex: number): Promise<string>;
+  otp(accountIndex: number, options?: OtpCodeRetrieverOptions): Promise<string>;
 }
 
 export interface ScraperWorkerApi {

@@ -190,6 +190,25 @@ describe("createOtpHandler", () => {
     expect(bot.telegram.sendMessage).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [undefined, "Please enter the OTP code sent to your phone"],
+    [{ attempt: 2 }, "❌ The previous code was rejected (attempt 2)."],
+    [{ attempt: 2, resent: true }, "📨 A new code was requested"],
+    [{ attempt: 2, resendFailed: true }, "⚠️ Could not ask the bank"],
+  ])(
+    "says why a prompt without a phone number was sent (%j)",
+    async (options, expected) => {
+      const request = requestOtpCode("hapoalim", undefined, undefined, options);
+      await flush();
+      expect(bot.telegram.sendMessage).toHaveBeenCalledWith(
+        "555",
+        expect.stringContaining(expected),
+      );
+      await reply(0, "123456", 1);
+      await expect(request).resolves.toBe("123456");
+    },
+  );
+
   it("reuses one dispatcher across completed requests", async () => {
     const combined = jest.spyOn(AbortSignal, "any");
     for (let i = 1; i <= 5; i++) {

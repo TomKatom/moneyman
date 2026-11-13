@@ -7,7 +7,7 @@ import type {
   RunTiming,
   ScraperConfig,
 } from "../types.js";
-import { CompanyTypes } from "israeli-bank-scrapers";
+import { CompanyTypes, OTP_RESEND } from "israeli-bank-scrapers";
 import { scrapeAccounts as runScrapeAccounts } from "./client.js";
 import type { OtpRequest } from "./otp.js";
 import { formatUnknownError } from "../utils/utils.js";
@@ -386,6 +386,46 @@ describe("Comlink scraper client", () => {
       "+97200000000",
       expect.any(AbortSignal),
     );
+  });
+
+  it("relays a Hapoalim OTP request with the scraper's attempt state and returns OTP_RESEND intact", async () => {
+    jest.mocked(requestOtpCode).mockResolvedValueOnce(OTP_RESEND);
+    const hapoalim: ScraperRunConfig = {
+      ...scraping,
+      accounts: [
+        {
+          companyId: CompanyTypes.hapoalim,
+          userCode: "bank-user",
+          password: "bank-password",
+        } as ScraperConfig["accounts"][number],
+      ],
+    };
+    api.scrape.mockImplementationOnce(async () => {
+      await expect(
+        callbacks().otp(0, { attempt: 2, resent: false }),
+      ).resolves.toBe(OTP_RESEND);
+      callbacks()[finalizer]();
+      return { results, domains: {} };
+    });
+    await scrapeAccounts(hapoalim);
+    expect(requestOtpCode).toHaveBeenCalledWith(
+      "hapoalim",
+      undefined,
+      expect.any(AbortSignal),
+      { attempt: 2, resent: false },
+    );
+  });
+
+  it("rejects OTP requests when OTP is disabled", async () => {
+    api.scrape.mockImplementationOnce(async () => {
+      await expect(callbacks().otp(0)).rejects.toThrow(
+        "Invalid scraper worker OTP request",
+      );
+      callbacks()[finalizer]();
+      return { results, domains: {} };
+    });
+    await scrapeAccounts({ ...scraping, enableOtp: false });
+    expect(requestOtpCode).not.toHaveBeenCalled();
   });
 
   it.each([-1, 0.5, 5])(

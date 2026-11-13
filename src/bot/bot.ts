@@ -67,7 +67,12 @@ export function createBot(bot: Telegraf<Context> | null) {
     return polling.lifetime;
   }
 
-  const requestOtpCode: OtpRequest = (companyId, phoneNumber, signal) => {
+  const requestOtpCode: OtpRequest = (
+    companyId,
+    phoneNumber,
+    signal,
+    options,
+  ) => {
     if (!pollingSignal) {
       return Promise.reject(new Error("Telegram bot polling is unavailable"));
     }
@@ -77,6 +82,7 @@ export function createBot(bot: Telegraf<Context> | null) {
       AbortSignal.any(
         [signal, pollingSignal].filter((signal) => signal !== undefined),
       ),
+      options,
     );
   };
 

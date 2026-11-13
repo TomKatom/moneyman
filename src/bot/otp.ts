@@ -1,3 +1,4 @@
+import type { OtpCodeRetrieverOptions } from "israeli-bank-scrapers";
 import { Context, Telegraf } from "telegraf";
 import { message } from "telegraf/filters";
 import { config } from "../config.js";
@@ -50,7 +51,12 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
     return ctx.reply("✅ OTP code received. Continuing authentication...");
   });
 
-  const requestOtpCode: OtpRequest = async (companyId, phoneNumber, signal) => {
+  const requestOtpCode: OtpRequest = async (
+    companyId,
+    phoneNumber,
+    signal,
+    options,
+  ) => {
     signal?.throwIfAborted();
     if (!bot || !telegramConfig?.chatId || !telegramConfig.enableOtp) {
       throw new Error("Telegram OTP is not enabled or configured");
@@ -76,7 +82,8 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
           telegramConfig.chatId,
           `🔐 2FA Authentication Required\n\n` +
             `Account: ${companyId}\n` +
-            `Please enter the OTP code sent to ${phoneNumber}:\n\n` +
+            otpRequestContext(options) +
+            `Please enter the OTP code sent to ${phoneNumber ?? "your phone"}:\n\n` +
             `Reply to this message with the code.`,
         ),
         cancellation,
@@ -109,4 +116,17 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
     }
   };
   return requestOtpCode;
+}
+
+function otpRequestContext(options?: OtpCodeRetrieverOptions): string {
+  if (options?.resendFailed) {
+    return `⚠️ Could not ask the bank for a new code — use the one you already have.\n`;
+  }
+  if (options?.resent) {
+    return `📨 A new code was requested, wait for the SMS.\n`;
+  }
+  if (options && options.attempt > 1) {
+    return `❌ The previous code was rejected (attempt ${options.attempt}).\n`;
+  }
+  return "";
 }

@@ -5,8 +5,13 @@ import { addAbortListener, once } from "node:events";
 import { aborted } from "node:util";
 import { finalizer, proxy, releaseProxy, wrap } from "comlink";
 import debug from "debug";
+import type { OtpCodeRetrieverOptions } from "israeli-bank-scrapers";
 import type { RunnerHooks, RunTiming } from "../types.js";
-import type { OtpRequest } from "./otp.js";
+import {
+  otpPhoneNumber,
+  shouldCreateOtpRetriever,
+  type OtpRequest,
+} from "./otp.js";
 import { workerEnvironment } from "./environment.js";
 import {
   WorkerConfigSchema,
@@ -102,25 +107,25 @@ export async function scrapeAccounts(
         warning: async (error: unknown, caller: string) => {
           await onError?.(error, caller);
         },
-        otp: async (accountIndex: number) => {
+        otp: async (
+          accountIndex: number,
+          options?: OtpCodeRetrieverOptions,
+        ) => {
           const account =
             Number.isInteger(accountIndex) && accountIndex >= 0
               ? scraping.accounts[accountIndex]
               : undefined;
           if (
-            !settings.enableOtp ||
             !account ||
-            account.companyId !== "oneZero" ||
-            !("phoneNumber" in account) ||
-            typeof account.phoneNumber !== "string" ||
-            "otpLongTermToken" in account
+            !shouldCreateOtpRetriever(account, settings.enableOtp)
           ) {
             throw new Error("Invalid scraper worker OTP request");
           }
           return requestOtpCode(
             account.companyId,
-            account.phoneNumber,
+            otpPhoneNumber(account),
             abort.signal,
+            ...(options ? [options] : []),
           );
         },
         [finalizer]: released,

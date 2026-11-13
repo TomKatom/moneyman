@@ -33,7 +33,12 @@ export function createOneShotOtpSession(signal?: AbortSignal) {
     return polling;
   }
 
-  const request: OtpRequest = async (companyId, phoneNumber, requestSignal) => {
+  const request: OtpRequest = async (
+    companyId,
+    phoneNumber,
+    requestSignal,
+    options,
+  ) => {
     signal?.throwIfAborted();
     requestSignal?.throwIfAborted();
 
@@ -47,7 +52,12 @@ export function createOneShotOtpSession(signal?: AbortSignal) {
       const lifetime = startPolling().then(() => {
         throw new Error("Telegram bot stopped while waiting for OTP");
       });
-      const response = requestOtpCode(companyId, phoneNumber, combined);
+      const response = requestOtpCode(
+        companyId,
+        phoneNumber,
+        combined,
+        options,
+      );
       return await Promise.race([response, lifetime]);
     } finally {
       completed.abort();
