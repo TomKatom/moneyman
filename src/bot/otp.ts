@@ -1,4 +1,7 @@
-import type { OtpCodeRetrieverOptions } from "israeli-bank-scrapers";
+import {
+  OTP_RESEND,
+  type OtpCodeRetrieverOptions,
+} from "israeli-bank-scrapers";
 import { Context, Telegraf } from "telegraf";
 import { message } from "telegraf/filters";
 import { config } from "../config.js";
@@ -8,9 +11,26 @@ import type { OtpRequest } from "../scraper/otp.js";
 
 const logger = createLogger("otp");
 
+const OTP_CODE_REPLY = /^\d{4,8}$/;
+const OTP_RESEND_REPLY = /^(resend|r|שלח שוב)$/i;
+
+/**
+ * Maps a reply to the OTP prompt to a code, the resend sentinel, or undefined
+ * when it is neither.
+ */
+export function parseOtpReply(text: string): string | undefined {
+  const reply = text.trim();
+  if (OTP_CODE_REPLY.test(reply)) return reply;
+  if (OTP_RESEND_REPLY.test(reply)) return OTP_RESEND;
+  return undefined;
+}
+
+/** Answers a reply with the acknowledgement to send, or undefined to ignore it */
+type OtpReceiver = (text: string, sentAt: number) => string | undefined;
+
 export function createOtpHandler(bot: Telegraf<Context> | null) {
   const telegramConfig = config.options.notifications?.telegram;
-  const pending = new Map<number, (text: string) => void>();
+  const pending = new Map<number, OtpReceiver>();
   const registering = new Set<Promise<number | undefined>>();
 
   bot?.on(message("text"), async (ctx, next) => {
@@ -47,8 +67,14 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
     }
     if (!receive) return next();
 
-    receive(text);
-    return ctx.reply("✅ OTP code received. Continuing authentication...");
+    const acknowledgement = receive(text, ctx.message.date);
+    if (acknowledgement === undefined) return next();
+    // Only the prompt itself may fail the login, not a failed reply to the user.
+    void ctx
+      .reply(acknowledgement)
+      .catch((error: unknown) =>
+        logger("Failed to acknowledge an OTP reply", error),
+      );
   });
 
   const requestOtpCode: OtpRequest = async (
@@ -75,6 +101,7 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
     const cancellation = aborted(combined, registration).then(() => undefined);
     registering.add(registration.promise);
     let messageId: number | undefined;
+    let reminder: NodeJS.Timeout | undefined;
 
     try {
       const requestMessage = await Promise.race([
@@ -84,7 +111,7 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
             `Account: ${companyId}\n` +
             otpRequestContext(options) +
             `Please enter the OTP code sent to ${phoneNumber ?? "your phone"}:\n\n` +
-            `Reply to this message with the code.`,
+            `Reply to this message with the digits, or "resend" for a fresh code.`,
         ),
         cancellation,
       ]);
@@ -96,10 +123,36 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
       }
       messageId = requestMessage.message_id;
       logger("Waiting for OTP code from user...");
-      pending.set(messageId, (text) => {
+      pending.set(messageId, (text, sentAt) => {
+        // Polling starts once per run, and Telegram redelivers whatever the
+        // previous run never confirmed: its last code, or a "resend".
+        if (sentAt < requestMessage.date) return undefined;
+        const reply = parseOtpReply(text);
+        if (reply === undefined) {
+          return `Reply with the ${companyId} OTP digits, or "resend" for a fresh code.`;
+        }
         pending.delete(requestMessage.message_id);
-        response.resolve(text);
+        response.resolve(reply);
+        if (reply === OTP_RESEND) {
+          logger("User asked for a new OTP code");
+          return "📨 Asking the bank for a new code...";
+        }
+        return "✅ OTP code received. Continuing authentication...";
       });
+      reminder = setTimeout(() => {
+        bot.telegram
+          .sendMessage(
+            telegramConfig.chatId,
+            `⏳ Still waiting for the ${companyId} OTP — ` +
+              `${Math.ceil(timeoutSeconds / 120)} minutes left. ` +
+              `Reply to the prompt with the digits, or "resend" for a fresh code.`,
+            { reply_parameters: { message_id: requestMessage.message_id } },
+          )
+          .catch((error: unknown) =>
+            logger("Failed to send OTP reminder", error),
+          );
+      }, timeoutSeconds * 500);
+      reminder.unref();
       registering.delete(registration.promise);
       registration.resolve(messageId);
       const received = await Promise.race([response.promise, cancellation]);
@@ -109,6 +162,7 @@ export function createOtpHandler(bot: Telegraf<Context> | null) {
         `OTP timeout: No response received within ${timeoutSeconds} seconds`,
       );
     } finally {
+      clearTimeout(reminder);
       completed.abort();
       if (messageId !== undefined) pending.delete(messageId);
       registering.delete(registration.promise);

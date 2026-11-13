@@ -1,7 +1,8 @@
 import { mock, mockDeep } from "jest-mock-extended";
 import { Context, Telegraf, type MiddlewareFn } from "telegraf";
 import type { Message } from "telegraf/types";
-import { createOtpHandler } from "./otp.js";
+import { OTP_RESEND } from "israeli-bank-scrapers";
+import { createOtpHandler, parseOtpReply } from "./otp.js";
 import { getEventListeners } from "node:events";
 
 jest.mock("../config.js", () => ({
@@ -287,4 +288,142 @@ describe("createOtpHandler", () => {
       }
     },
   );
+
+  describe("resend, reminder and stale replies", () => {
+    const PROMPT_DATE = 1_800_000_000;
+
+    beforeEach(() => {
+      bot.telegram.sendMessage.mockImplementation(async () =>
+        mock<Message.TextMessage>({ message_id: 1, date: PROMPT_DATE }),
+      );
+    });
+
+    afterEach(() => jest.useRealTimers());
+
+    async function send(text: string, date = PROMPT_DATE) {
+      const handler = bot.on.mock.calls[0][1] as MiddlewareFn<Context>;
+      const ctx = mock<Context>({
+        chat: { id: 555, type: "private", first_name: "user" },
+        message: { text, date, reply_to_message: undefined },
+      });
+      ctx.reply.mockResolvedValue(mock<Message.TextMessage>());
+      const next = jest.fn(async () => {});
+      await handler(ctx, next);
+      return { ctx, next };
+    }
+
+    it.each([
+      ["123456", "123456"],
+      [" 1234 ", "1234"],
+      ["12345678", "12345678"],
+      ["resend", OTP_RESEND],
+      ["R", OTP_RESEND],
+      ["שלח שוב", OTP_RESEND],
+      ["123", undefined],
+      ["123456789", undefined],
+      ["12 34 56", undefined],
+      ["thanks", undefined],
+    ])("parses %p as %p", (text, expected) => {
+      expect(parseOtpReply(text)).toBe(expected);
+    });
+
+    it("resolves OTP_RESEND when asked for a fresh code", async () => {
+      const request = requestOtpCode("hapoalim");
+      await flush();
+      const { ctx } = await send("resend");
+      await expect(request).resolves.toBe(OTP_RESEND);
+      expect(ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining("new code"),
+      );
+    });
+
+    it("keeps waiting after a reply that is neither a code nor a resend", async () => {
+      const request = requestOtpCode("hapoalim");
+      await flush();
+      const chatter = await send("which code?");
+      expect(chatter.ctx.reply).toHaveBeenCalledWith(
+        expect.stringContaining('"resend"'),
+      );
+      expect(await settleState(request)).toBe("pending");
+
+      await send("123456");
+      await expect(request).resolves.toBe("123456");
+    });
+
+    it("ignores messages older than the prompt", async () => {
+      const request = requestOtpCode("hapoalim");
+      await flush();
+      const stale = await send("654321", PROMPT_DATE - 5);
+      expect(stale.ctx.reply).not.toHaveBeenCalled();
+      expect(stale.next).toHaveBeenCalledTimes(1);
+      expect(await settleState(request)).toBe("pending");
+
+      await send("123456");
+      await expect(request).resolves.toBe("123456");
+    });
+
+    it("reminds at half the timeout, as a reply to the prompt", async () => {
+      jest.useFakeTimers({
+        doNotFake: ["setImmediate", "nextTick", "queueMicrotask"],
+      });
+      const request = requestOtpCode("hapoalim");
+      await flush();
+      jest.advanceTimersByTime(1_800_000);
+      expect(bot.telegram.sendMessage).toHaveBeenLastCalledWith(
+        "555",
+        expect.stringContaining("30 minutes left"),
+        { reply_parameters: { message_id: 1 } },
+      );
+
+      await send("123456");
+      await expect(request).resolves.toBe("123456");
+    });
+
+    it("does not remind once answered", async () => {
+      jest.useFakeTimers({
+        doNotFake: ["setImmediate", "nextTick", "queueMicrotask"],
+      });
+      const request = requestOtpCode("hapoalim");
+      await flush();
+      await send("123456");
+      await request;
+      jest.advanceTimersByTime(3_600_000);
+      expect(bot.telegram.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not fail the login when the reminder or a reply to the user fails", async () => {
+      jest.useFakeTimers({
+        doNotFake: ["setImmediate", "nextTick", "queueMicrotask"],
+      });
+      const unhandled = jest.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        const request = requestOtpCode("hapoalim");
+        await flush();
+        bot.telegram.sendMessage.mockRejectedValueOnce(new Error("429"));
+        jest.advanceTimersByTime(1_800_000);
+
+        const handler = bot.on.mock.calls[0][1] as MiddlewareFn<Context>;
+        const ctx = mock<Context>({
+          chat: { id: 555, type: "private", first_name: "user" },
+          message: { text: "which code?", date: PROMPT_DATE },
+        });
+        ctx.reply.mockRejectedValue(new Error("network down"));
+        await handler(
+          ctx,
+          jest.fn(async () => {}),
+        );
+        expect(ctx.reply).toHaveBeenCalled();
+        await flush();
+        await flush();
+
+        expect(await settleState(request)).toBe("pending");
+        await send("123456");
+        await expect(request).resolves.toBe("123456");
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+  });
 });
